@@ -42,15 +42,40 @@ func broadcast(conf *broadcastConfig) error {
 		return err
 	}
 
-	response, err := daemonClient.Broadcast(ctx, &pb.BroadcastRequest{Transactions: transactions})
+	err = broadcastInBatches(ctx, daemonClient, transactions)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Transactions were sent successfully")
-	fmt.Println("Transaction ID(s): ")
-	for _, txID := range response.TxIDs {
-		fmt.Printf("\t%s\n", txID)
-	}
 
+	return nil
+}
+
+func broadcastInBatches(ctx context.Context, daemonClient pb.KaspawalletdClient, transactions [][]byte) error {
+	const batch = 50
+	position := 0
+
+	// We send in batches to avoid communication errors
+	for position < len(transactions) {
+		var transactionBatch [][]byte
+		if position+batch > len(transactions) {
+			transactionBatch = transactions[position:]
+		} else {
+			transactionBatch = transactions[position : position+batch]
+		}
+		response, err := daemonClient.Broadcast(ctx, &pb.BroadcastRequest{Transactions: transactionBatch})
+		if err != nil {
+			return err
+		}
+		if position == 0 && position+batch >= len(transactions) {
+			fmt.Println("Transactions were sent successfully")
+		} else {
+			fmt.Println("Transaction batch was sent successfully")
+		}
+		fmt.Println("Transaction ID(s): ")
+		for _, txID := range response.TxIDs {
+			fmt.Printf("\t%s\n", txID)
+		}
+		position += batch
+	}
 	return nil
 }
