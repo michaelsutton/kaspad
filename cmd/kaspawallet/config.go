@@ -81,9 +81,9 @@ type sweepConfig struct {
 
 type createUnsignedTransactionConfig struct {
 	DaemonAddress            string   `long:"daemonaddress" short:"d" description:"Wallet daemon server to connect to"`
-	ToAddress                string   `long:"to-address" short:"t" description:"The public address to send Kaspa to" required:"true"`
+	ToAddress                []string `long:"to-address" short:"t" description:"The public address to send Kaspa to. Use multiple times to accept several addresses" required:"true"`
 	FromAddresses            []string `long:"from-address" short:"a" description:"Specific public address to send Kaspa from. Use multiple times to accept several addresses" required:"false"`
-	SendAmount               string   `long:"send-amount" short:"v" description:"An amount to send in Kaspa (e.g. 1234.12345678)"`
+	SendAmount               []string `long:"send-amount" short:"v" description:"An amount to send in Kaspa (e.g. 1234.12345678). Use multiple times to match each --to-address"`
 	IsSendAll                bool     `long:"send-all" description:"Send all the Kaspa in the wallet (mutually exclusive with --send-amount)"`
 	UseExistingChangeAddress bool     `long:"use-existing-change-address" short:"u" description:"Will use an existing change address (in case no change address was ever used, it will use a new one)"`
 	MaxFeeRate               float64  `long:"max-fee-rate" short:"m" description:"Maximum fee rate in Sompi/gram to use for the transaction. The wallet will take the minimum between the fee rate estimate from the connected node and this value."`
@@ -386,10 +386,20 @@ func parseCommandLine() (subCommand string, config interface{}) {
 }
 
 func validateCreateUnsignedTransactionConf(conf *createUnsignedTransactionConfig) error {
-	if (!conf.IsSendAll && conf.SendAmount == "") ||
-		(conf.IsSendAll && conf.SendAmount != "") {
+	if !conf.IsSendAll && len(conf.SendAmount) == 0 {
+		return errors.New("when '--send-all' is not set, '--send-amount' must be specified at least once")
+	}
 
-		return errors.New("exactly one of '--send-amount' or '--all' must be specified")
+	if conf.IsSendAll && len(conf.SendAmount) != 0 {
+		return errors.New("'--send-all' is mutually exclusive with '--send-amount'")
+	}
+
+	if !conf.IsSendAll && len(conf.ToAddress) != len(conf.SendAmount) {
+		return errors.New("'--to-address' and '--send-amount' must have the same number of values")
+	}
+
+	if conf.IsSendAll && len(conf.ToAddress) != 1 {
+		return errors.New("'--send-all' currently supports exactly one '--to-address'")
 	}
 
 	if conf.MaxFeeRate < 0 {

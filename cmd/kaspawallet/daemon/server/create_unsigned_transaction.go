@@ -7,6 +7,7 @@ import (
 
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/daemon/pb"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet"
+	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet/serialization"
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/constants"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/utxo"
@@ -31,8 +32,35 @@ func (s *server) CreateUnsignedTransactions(_ context.Context, request *pb.Creat
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	unsignedTransactions, err := s.createUnsignedTransactions(request.Address, request.Amount, request.IsSendAll,
-		request.From, request.UseExistingChangeAddress, request.FeePolicy)
+	toAddresses := request.ToAddresses
+	if len(toAddresses) == 0 && request.Address != "" {
+		toAddresses = []string{request.Address}
+	}
+	if len(toAddresses) == 0 {
+		return nil, errors.New("at least one destination address is required")
+	}
+
+	amounts := request.Amounts
+	if len(amounts) == 0 {
+		amounts = []uint64{request.Amount}
+	}
+	if !request.IsSendAll && len(toAddresses) != len(amounts) {
+		return nil, errors.Errorf("got %d destination addresses but %d amounts", len(toAddresses), len(amounts))
+	}
+
+	var unsignedTransactions [][]byte
+	var err error
+	if len(toAddresses) > 1 {
+		if request.IsSendAll {
+			return nil, errors.New("send-all is not supported with multiple destination addresses")
+		}
+
+		unsignedTransactions, err = s.createUnsignedTransactionsMulti(toAddresses, amounts,
+			request.From, request.UseExistingChangeAddress, request.FeePolicy)
+	} else {
+		unsignedTransactions, err = s.createUnsignedTransactions(toAddresses[0], amounts[0], request.IsSendAll,
+			request.From, request.UseExistingChangeAddress, request.FeePolicy)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +111,18 @@ func (s *server) calculateFeeLimits(requestFeePolicy *pb.FeePolicy) (feeRate flo
 	return feeRate, maxFee, nil
 }
 
+func (s *server) fromAddresses(fromAddressesString []string) ([]*walletAddress, error) {
+	var fromAddresses []*walletAddress
+	for _, from := range fromAddressesString {
+		fromAddress, exists := s.addressSet[from]
+		if !exists {
+			return nil, fmt.Errorf("specified from address %s does not exists", from)
+		}
+		fromAddresses = append(fromAddresses, fromAddress)
+	}
+	return fromAddresses, nil
+}
+
 func (s *server) createUnsignedTransactions(address string, amount uint64, isSendAll bool, fromAddressesString []string, useExistingChangeAddress bool, requestFeePolicy *pb.FeePolicy) ([][]byte, error) {
 	if !s.isSynced() {
 		return nil, errors.Errorf("wallet daemon is not synced yet, %s", s.formatSyncStateReport())
@@ -100,13 +140,9 @@ func (s *server) createUnsignedTransactions(address string, amount uint64, isSen
 		return nil, err
 	}
 
-	var fromAddresses []*walletAddress
-	for _, from := range fromAddressesString {
-		fromAddress, exists := s.addressSet[from]
-		if !exists {
-			return nil, fmt.Errorf("specified from address %s does not exists", from)
-		}
-		fromAddresses = append(fromAddresses, fromAddress)
+	fromAddresses, err := s.fromAddresses(fromAddressesString)
+	if err != nil {
+		return nil, err
 	}
 
 	changeAddress, changeWalletAddress, err := s.changeAddress(useExistingChangeAddress, fromAddresses)
@@ -145,6 +181,168 @@ func (s *server) createUnsignedTransactions(address string, amount uint64, isSen
 		return nil, err
 	}
 	return unsignedTransactions, nil
+}
+
+func (s *server) createUnsignedTransactionsMulti(addresses []string, amounts []uint64, fromAddressesString []string,
+	useExistingChangeAddress bool, requestFeePolicy *pb.FeePolicy) ([][]byte, error) {
+
+	if !s.isSynced() {
+		return nil, errors.Errorf("wallet daemon is not synced yet, %s", s.formatSyncStateReport())
+	}
+
+	feeRate, maxFee, err := s.calculateFeeLimits(requestFeePolicy)
+	if err != nil {
+		return nil, err
+	}
+
+	payments := make([]*libkaspawallet.Payment, len(addresses))
+	totalSpendAmount := uint64(0)
+	for i, address := range addresses {
+		toAddress, err := util.DecodeAddress(address, s.params.Prefix)
+		if err != nil {
+			return nil, err
+		}
+
+		if totalSpendAmount > math.MaxUint64-amounts[i] {
+			return nil, errors.New("total payment amount overflows uint64")
+		}
+		totalSpendAmount += amounts[i]
+		payments[i] = &libkaspawallet.Payment{
+			Address: toAddress,
+			Amount:  amounts[i],
+		}
+	}
+
+	fromAddresses, err := s.fromAddresses(fromAddressesString)
+	if err != nil {
+		return nil, err
+	}
+
+	changeAddress, _, err := s.changeAddress(useExistingChangeAddress, fromAddresses)
+	if err != nil {
+		return nil, err
+	}
+
+	selectedUTXOs, changeSompi, err := s.selectUTXOsForPayments(totalSpendAmount, feeRate, maxFee, fromAddresses)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(selectedUTXOs) == 0 {
+		return nil, errors.Errorf("couldn't find funds to spend")
+	}
+
+	if changeSompi > 0 {
+		payments = append(payments, &libkaspawallet.Payment{
+			Address: changeAddress,
+			Amount:  changeSompi,
+		})
+	}
+
+	unsignedTransaction, err := libkaspawallet.CreateUnsignedTransaction(s.keysFile.ExtendedPublicKeys,
+		s.keysFile.MinimumSignatures, payments, selectedUTXOs)
+	if err != nil {
+		return nil, err
+	}
+
+	unsignedTransactionBytes, err := serialization.SerializePartiallySignedTransaction(unsignedTransaction)
+	if err != nil {
+		return nil, err
+	}
+
+	return [][]byte{unsignedTransactionBytes}, nil
+}
+
+func (s *server) selectUTXOsForPayments(spendAmount uint64, feeRate float64, maxFee uint64, fromAddresses []*walletAddress) (
+	selectedUTXOs []*libkaspawallet.UTXO, changeSompi uint64, err error) {
+	return s.selectUTXOsWithPreselectedForPayments(nil, map[externalapi.DomainOutpoint]struct{}{}, spendAmount, feeRate, maxFee, fromAddresses)
+}
+
+func (s *server) selectUTXOsWithPreselectedForPayments(preSelectedUTXOs []*walletUTXO,
+	allowUsed map[externalapi.DomainOutpoint]struct{}, spendAmount uint64, feeRate float64, maxFee uint64,
+	fromAddresses []*walletAddress) (selectedUTXOs []*libkaspawallet.UTXO, changeSompi uint64, err error) {
+
+	preSelectedSet := make(map[externalapi.DomainOutpoint]struct{})
+	for _, utxo := range preSelectedUTXOs {
+		preSelectedSet[*utxo.Outpoint] = struct{}{}
+	}
+	totalValue := uint64(0)
+
+	dagInfo, err := s.rpcClient.GetBlockDAGInfo()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var fee uint64
+	iteration := func(utxo *walletUTXO, avoidPreselected bool) (bool, error) {
+		if (fromAddresses != nil && !walletAddressesContain(fromAddresses, utxo.address)) ||
+			!s.isUTXOSpendable(utxo, dagInfo.VirtualDAAScore) {
+			return true, nil
+		}
+
+		if broadcastTime, ok := s.usedOutpoints[*utxo.Outpoint]; ok {
+			if _, ok := allowUsed[*utxo.Outpoint]; !ok {
+				if s.usedOutpointHasExpired(broadcastTime) {
+					delete(s.usedOutpoints, *utxo.Outpoint)
+				} else {
+					return true, nil
+				}
+			}
+		}
+
+		if avoidPreselected {
+			if _, ok := preSelectedSet[*utxo.Outpoint]; ok {
+				return true, nil
+			}
+		}
+
+		selectedUTXOs = append(selectedUTXOs, &libkaspawallet.UTXO{
+			Outpoint:       utxo.Outpoint,
+			UTXOEntry:      utxo.UTXOEntry,
+			DerivationPath: s.walletAddressPath(utxo.address),
+		})
+
+		totalValue += utxo.UTXOEntry.Amount()
+		fee, err = s.estimateFee(selectedUTXOs, feeRate, maxFee, spendAmount)
+		if err != nil {
+			return false, err
+		}
+
+		return totalValue < spendAmount+fee, nil
+	}
+
+	shouldContinue := true
+	for _, utxo := range preSelectedUTXOs {
+		shouldContinue, err = iteration(utxo, false)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		if !shouldContinue {
+			break
+		}
+	}
+
+	if shouldContinue {
+		for _, utxo := range s.utxosSortedByAmount {
+			shouldContinue, err = iteration(utxo, true)
+			if err != nil {
+				return nil, 0, err
+			}
+
+			if !shouldContinue {
+				break
+			}
+		}
+	}
+
+	totalSpend := spendAmount + fee
+	if totalValue < totalSpend {
+		return nil, 0, errors.Errorf("Insufficient funds for send: %f required, while only %f available",
+			float64(totalSpend)/constants.SompiPerKaspa, float64(totalValue)/constants.SompiPerKaspa)
+	}
+
+	return selectedUTXOs, totalValue - totalSpend, nil
 }
 
 func (s *server) selectUTXOs(spendAmount uint64, isSendAll bool, feeRate float64, maxFee uint64, fromAddresses []*walletAddress) (

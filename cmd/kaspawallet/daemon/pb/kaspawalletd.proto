@@ -54,6 +54,8 @@ message CreateUnsignedTransactionsRequest {
   bool useExistingChangeAddress = 4;
   bool isSendAll = 5;
   FeePolicy feePolicy = 6;
+  repeated string toAddresses = 7;
+  repeated uint64 amounts = 8;
 }
 
 message CreateUnsignedTransactionsResponse {
