@@ -10,7 +10,6 @@ import (
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet/serialization"
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/consensushashing"
-	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
 	"github.com/pkg/errors"
 )
 
@@ -72,7 +71,7 @@ func (s *server) broadcastReplacement(transactions [][]byte, isDomain bool) ([]s
 	return txIDs, nil
 }
 
-func sendTransactionRBF(client *rpcclient.RPCClient, tx *externalapi.DomainTransaction) (string, error) {
+func sendTransactionRBF(client walletRPCClient, tx *externalapi.DomainTransaction) (string, error) {
 	submitTransactionResponse, err := client.SubmitTransactionReplacement(appmessage.DomainTransactionToRPCTransaction(tx), consensushashing.TransactionID(tx).String())
 	if err != nil {
 		return "", errors.Wrapf(err, "error submitting transaction replacement")

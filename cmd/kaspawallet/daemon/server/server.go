@@ -19,7 +19,6 @@ import (
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/daemon/pb"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/keys"
 	"github.com/kaspanet/kaspad/domain/dagconfig"
-	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
 	"github.com/kaspanet/kaspad/infrastructure/os/signal"
 	"github.com/kaspanet/kaspad/util/panics"
 	"github.com/pkg/errors"
@@ -30,8 +29,8 @@ import (
 type server struct {
 	pb.UnimplementedKaspawalletdServer
 
-	rpcClient           *rpcclient.RPCClient // RPC client for ongoing user requests
-	backgroundRPCClient *rpcclient.RPCClient // RPC client dedicated for address and UTXO background fetching
+	rpcClient           walletRPCClient // RPC client for ongoing user requests
+	backgroundRPCClient walletRPCClient // RPC client dedicated for address and UTXO background fetching
 	params              *dagconfig.Params
 	coinbaseMaturity    uint64 // Different from go-kaspad default following Crescendo
 
