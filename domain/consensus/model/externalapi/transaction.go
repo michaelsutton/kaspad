@@ -139,13 +139,14 @@ type DomainTransactionInput struct {
 	SignatureScript  []byte
 	Sequence         uint64
 	SigOpCount       byte
+	ComputeBudget    uint32
 
 	UTXOEntry UTXOEntry
 }
 
 // If this doesn't compile, it means the type definition has been changed, so it's
 // an indication to update Equal and Clone accordingly.
-var _ = &DomainTransactionInput{DomainOutpoint{}, []byte{}, 0, 0, nil}
+var _ = &DomainTransactionInput{DomainOutpoint{}, []byte{}, 0, 0, 0, nil}
 
 // Equal returns whether input equals to other
 func (input *DomainTransactionInput) Equal(other *DomainTransactionInput) bool {
@@ -169,6 +170,10 @@ func (input *DomainTransactionInput) Equal(other *DomainTransactionInput) bool {
 		return false
 	}
 
+	if input.ComputeBudget != other.ComputeBudget {
+		return false
+	}
+
 	if input.UTXOEntry != nil && other.UTXOEntry != nil && !input.UTXOEntry.Equal(other.UTXOEntry) {
 		panic(errors.New("identical inputs should always have the same UTXO entry"))
 	}
@@ -186,6 +191,7 @@ func (input *DomainTransactionInput) Clone() *DomainTransactionInput {
 		SignatureScript:  signatureScriptClone,
 		Sequence:         input.Sequence,
 		SigOpCount:       input.SigOpCount,
+		ComputeBudget:    input.ComputeBudget,
 		UTXOEntry:        input.UTXOEntry,
 	}
 }
@@ -266,15 +272,22 @@ func NewScriptPublicKeyFromString(ScriptPublicKeyString string) *ScriptPublicKey
 	return &ScriptPublicKey{Script: script, Version: version}
 }
 
+// DomainTransactionOutputCovenantBinding describes a covenant binding on a transaction output.
+type DomainTransactionOutputCovenantBinding struct {
+	AuthorizingInput uint32
+	CovenantID       string
+}
+
 // DomainTransactionOutput represents a Kaspad transaction output
 type DomainTransactionOutput struct {
 	Value           uint64
 	ScriptPublicKey *ScriptPublicKey
+	Covenant        *DomainTransactionOutputCovenantBinding
 }
 
 // If this doesn't compile, it means the type definition has been changed, so it's
 // an indication to update Equal and Clone accordingly.
-var _ = DomainTransactionOutput{0, &ScriptPublicKey{Script: []byte{}, Version: 0}}
+var _ = DomainTransactionOutput{0, &ScriptPublicKey{Script: []byte{}, Version: 0}, nil}
 
 // Equal returns whether output equals to other
 func (output *DomainTransactionOutput) Equal(other *DomainTransactionOutput) bool {
@@ -286,7 +299,16 @@ func (output *DomainTransactionOutput) Equal(other *DomainTransactionOutput) boo
 		return false
 	}
 
-	return output.ScriptPublicKey.Equal(other.ScriptPublicKey)
+	if !output.ScriptPublicKey.Equal(other.ScriptPublicKey) {
+		return false
+	}
+
+	if output.Covenant == nil || other.Covenant == nil {
+		return output.Covenant == other.Covenant
+	}
+
+	return output.Covenant.AuthorizingInput == other.Covenant.AuthorizingInput &&
+		output.Covenant.CovenantID == other.Covenant.CovenantID
 }
 
 // Clone returns a clone of DomainTransactionOutput
@@ -296,9 +318,18 @@ func (output *DomainTransactionOutput) Clone() *DomainTransactionOutput {
 		Version: output.ScriptPublicKey.Version}
 	copy(scriptPublicKeyClone.Script, output.ScriptPublicKey.Script)
 
+	var covenantClone *DomainTransactionOutputCovenantBinding
+	if output.Covenant != nil {
+		covenantClone = &DomainTransactionOutputCovenantBinding{
+			AuthorizingInput: output.Covenant.AuthorizingInput,
+			CovenantID:       output.Covenant.CovenantID,
+		}
+	}
+
 	return &DomainTransactionOutput{
 		Value:           output.Value,
 		ScriptPublicKey: scriptPublicKeyClone,
+		Covenant:        covenantClone,
 	}
 }
 
